@@ -15,10 +15,11 @@
 release_hdr := $(shell sh -c './mkreleasehdr.sh')
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 OPTIMIZATION?=-O2
-DEPENDENCY_TARGETS=hiredis linenoise lua geohash-int
+DEPENDENCY_TARGETS=hiredis linenoise lua geohash-int v8
+NODEPS:=clean distclean
 
 # Default settings
-STD=-std=c99 -pedantic -DREDIS_STATIC=''
+STD=-pedantic -DREDIS_STATIC=''
 WARN=-Wall -W
 OPT=$(OPTIMIZATION)
 
@@ -54,8 +55,9 @@ endif
 -include .make-settings
 
 FINAL_CFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS) -I../deps/geohash-int
+FINAL_CXXFLAGS=$(STD) $(WARN) $(OPT) $(DEBUG) $(CFLAGS) $(REDIS_CFLAGS) -I../deps/geohash-int -I../deps/v8/include/ -Wc++11-long-long -Wc99-extensions
 FINAL_LDFLAGS=$(LDFLAGS) $(REDIS_LDFLAGS) $(DEBUG)
-FINAL_LIBS=-lm
+FINAL_LIBS=-lm -stdlib=libstdc++ ../deps/v8/out/x64.release/{libv8_{base,libbase,libplatform,nosnapshot},libicu{i18n,uc,data}}.a
 DEBUG=-g -ggdb
 
 ifeq ($(uname_S),SunOS)
@@ -65,17 +67,27 @@ ifeq ($(uname_S),SunOS)
 	FINAL_LIBS+= -ldl -lnsl -lsocket -lresolv -lpthread -lrt
 else
 ifeq ($(uname_S),Darwin)
-	# Darwin (nothing to do)
+	# Darwin
+	FINAL_LIBS+= -ldl
 else
 ifeq ($(uname_S),AIX)
         # AIX
         FINAL_LDFLAGS+= -Wl,-bexpall
-        FINAL_LIBS+= -pthread -lcrypt -lbsd
-
+        FINAL_LIBS+=-ldl -pthread -lcrypt -lbsd
+else
+ifeq ($(uname_S),OpenBSD)
+	# OpenBSD
+	FINAL_LIBS+= -lpthread
+else
+ifeq ($(uname_S),FreeBSD)
+	# FreeBSD
+	FINAL_LIBS+= -lpthread
 else
 	# All the other OSes (notably Linux)
 	FINAL_LDFLAGS+= -rdynamic
-	FINAL_LIBS+= -pthread
+	FINAL_LIBS+=-ldl -pthread
+endif
+endif
 endif
 endif
 endif
@@ -84,22 +96,26 @@ FINAL_CFLAGS+= -I../deps/hiredis -I../deps/linenoise -I../deps/lua/src
 
 ifeq ($(MALLOC),tcmalloc)
 	FINAL_CFLAGS+= -DUSE_TCMALLOC
+	FINAL_CXXFLAGS+= -DUSE_TCMALLOC
 	FINAL_LIBS+= -ltcmalloc
 endif
 
 ifeq ($(MALLOC),tcmalloc_minimal)
 	FINAL_CFLAGS+= -DUSE_TCMALLOC
+	FINAL_CXXFLAGS+= -DUSE_TCMALLOC
 	FINAL_LIBS+= -ltcmalloc_minimal
 endif
 
 ifeq ($(MALLOC),jemalloc)
 	DEPENDENCY_TARGETS+= jemalloc
 	FINAL_CFLAGS+= -DUSE_JEMALLOC -I../deps/jemalloc/include
-	FINAL_LIBS+= ../deps/jemalloc/lib/libjemalloc.a -ldl
+	FINAL_LIBS+= ../deps/jemalloc/lib/libjemalloc.a
+	FINAL_CXXFLAGS+= -DUSE_JEMALLOC -I../deps/jemalloc/include
 endif
 
 REDIS_CC=$(QUIET_CC)$(CC) $(FINAL_CFLAGS)
-REDIS_LD=$(QUIET_LINK)$(CC) $(FINAL_LDFLAGS)
+REDIS_CXX=$(QUIET_CXX)$(CXX) $(FINAL_CXXFLAGS)
+REDIS_LD=$(QUIET_LINK)$(CXX) $(FINAL_LDFLAGS)
 REDIS_INSTALL=$(QUIET_INSTALL)$(INSTALL)
 
 CCCOLOR="\033[34m"
@@ -111,13 +127,14 @@ ENDCOLOR="\033[0m"
 
 ifndef V
 QUIET_CC = @printf '    %b %b\n' $(CCCOLOR)CC$(ENDCOLOR) $(SRCCOLOR)$@$(ENDCOLOR) 1>&2;
+QUIET_CXX = @printf '    %b %b\n' $(CCCOLOR)CXX$(ENDCOLOR) $(SRCCOLOR)$@$(ENDCOLOR) 1>&2;
 QUIET_LINK = @printf '    %b %b\n' $(LINKCOLOR)LINK$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR) 1>&2;
 QUIET_INSTALL = @printf '    %b %b\n' $(LINKCOLOR)INSTALL$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR) 1>&2;
 endif
 
 REDIS_SERVER_NAME=redis-server
 REDIS_SENTINEL_NAME=redis-sentinel
-REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o geo.o
+REDIS_SERVER_OBJ=adlist.o quicklist.o ae.o anet.o dict.o server.o sds.o zmalloc.o lzf_c.o lzf_d.o pqsort.o zipmap.o sha1.o ziplist.o release.o networking.o util.o object.o db.o replication.o rdb.o t_string.o t_list.o t_set.o t_zset.o t_hash.o config.o aof.o pubsub.o multi.o debug.o sort.o intset.o syncio.o cluster.o crc16.o endianconv.o slowlog.o scripting.o bio.o rio.o rand.o memtest.o crc64.o bitops.o sentinel.o notify.o setproctitle.o blocked.o hyperloglog.o latency.o sparkline.o redis-check-rdb.o geo.o lazyfree.o module.o scripting-v8.o
 REDIS_GEOHASH_OBJ=../deps/geohash-int/geohash.o ../deps/geohash-int/geohash_helper.o
 REDIS_CLI_NAME=redis-cli
 REDIS_CLI_OBJ=anet.o adlist.o redis-cli.o zmalloc.o release.o anet.o ae.o crc64.o
@@ -198,7 +215,10 @@ $(REDIS_CHECK_AOF_NAME): $(REDIS_CHECK_AOF_OBJ)
 # building it should complete before building any other object. Instead of
 # depending on a single artifact, build all dependencies first.
 %.o: %.c .make-prerequisites
-	$(REDIS_CC) -c $<
+	$(REDIS_CC) -std=c99 -c $<
+
+%.o: %.cc .make-prerequisites
+	$(REDIS_CXX) -std=c++11 -Wno-unused-parameter -Wno-c99-extensions -c $<
 
 clean:
 	rm -rf $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) *.o *.gcda *.gcno *.gcov redis.info lcov-html

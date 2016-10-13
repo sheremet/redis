@@ -33,6 +33,7 @@
 #include "fmacros.h"
 #include "config.h"
 #include "solarisfixes.h"
+#include "rio.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,9 +109,12 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_DEFAULT_PID_FILE "/var/run/redis.pid"
 #define CONFIG_DEFAULT_SYSLOG_IDENT "redis"
 #define CONFIG_DEFAULT_CLUSTER_CONFIG_FILE "nodes.conf"
+#define CONFIG_DEFAULT_CLUSTER_ANNOUNCE_IP NULL         /* Auto detect. */
+#define CONFIG_DEFAULT_CLUSTER_ANNOUNCE_PORT 0          /* Use server.port */
+#define CONFIG_DEFAULT_CLUSTER_ANNOUNCE_BUS_PORT 0      /* Use +10000 offset. */
 #define CONFIG_DEFAULT_DAEMONIZE 0
 #define CONFIG_DEFAULT_UNIX_SOCKET_PERM 0
-#define CONFIG_DEFAULT_TCP_KEEPALIVE 300
+#define CONFIG_DEFAULT_TCP_KEEPALIVE 0
 #define CONFIG_DEFAULT_PROTECTED_MODE 1
 #define CONFIG_DEFAULT_LOGFILE ""
 #define CONFIG_DEFAULT_SYSLOG_ENABLED 0
@@ -122,8 +126,6 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_DEFAULT_REPL_DISKLESS_SYNC_DELAY 5
 #define CONFIG_DEFAULT_SLAVE_SERVE_STALE_DATA 1
 #define CONFIG_DEFAULT_SLAVE_READ_ONLY 1
-#define CONFIG_DEFAULT_SLAVE_ANNOUNCE_IP NULL
-#define CONFIG_DEFAULT_SLAVE_ANNOUNCE_PORT 0
 #define CONFIG_DEFAULT_REPL_DISABLE_TCP_NODELAY 0
 #define CONFIG_DEFAULT_MAXMEMORY 0
 #define CONFIG_DEFAULT_MAXMEMORY_SAMPLES 5
@@ -139,6 +141,10 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CONFIG_BINDADDR_MAX 16
 #define CONFIG_MIN_RESERVED_FDS 32
 #define CONFIG_DEFAULT_LATENCY_MONITOR_THRESHOLD 0
+#define CONFIG_DEFAULT_SLAVE_LAZY_FLUSH 0
+#define CONFIG_DEFAULT_LAZYFREE_LAZY_EVICTION 0
+#define CONFIG_DEFAULT_LAZYFREE_LAZY_EXPIRE 0
+#define CONFIG_DEFAULT_LAZYFREE_LAZY_SERVER_DEL 0
 
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
 #define ACTIVE_EXPIRE_CYCLE_FAST_DURATION 1000 /* Microseconds */
@@ -173,68 +179,22 @@ typedef long long mstime_t; /* millisecond time type. */
 
 /* Command flags. Please check the command table defined in the redis.c file
  * for more information about the meaning of every flag. */
-#define CMD_WRITE 1                   /* "w" flag */
-#define CMD_READONLY 2                /* "r" flag */
-#define CMD_DENYOOM 4                 /* "m" flag */
-#define CMD_NOT_USED_1 8              /* no longer used flag */
-#define CMD_ADMIN 16                  /* "a" flag */
-#define CMD_PUBSUB 32                 /* "p" flag */
-#define CMD_NOSCRIPT  64              /* "s" flag */
-#define CMD_RANDOM 128                /* "R" flag */
-#define CMD_SORT_FOR_SCRIPT 256       /* "S" flag */
-#define CMD_LOADING 512               /* "l" flag */
-#define CMD_STALE 1024                /* "t" flag */
-#define CMD_SKIP_MONITOR 2048         /* "M" flag */
-#define CMD_ASKING 4096               /* "k" flag */
-#define CMD_FAST 8192                 /* "F" flag */
-
-/* Object types */
-#define OBJ_STRING 0
-#define OBJ_LIST 1
-#define OBJ_SET 2
-#define OBJ_ZSET 3
-#define OBJ_HASH 4
-
-/* Objects encoding. Some kind of objects like Strings and Hashes can be
- * internally represented in multiple ways. The 'encoding' field of the object
- * is set to one of this fields for this object. */
-#define OBJ_ENCODING_RAW 0     /* Raw representation */
-#define OBJ_ENCODING_INT 1     /* Encoded as integer */
-#define OBJ_ENCODING_HT 2      /* Encoded as hash table */
-#define OBJ_ENCODING_ZIPMAP 3  /* Encoded as zipmap */
-#define OBJ_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
-#define OBJ_ENCODING_ZIPLIST 5 /* Encoded as ziplist */
-#define OBJ_ENCODING_INTSET 6  /* Encoded as intset */
-#define OBJ_ENCODING_SKIPLIST 7  /* Encoded as skiplist */
-#define OBJ_ENCODING_EMBSTR 8  /* Embedded sds string encoding */
-#define OBJ_ENCODING_QUICKLIST 9 /* Encoded as linked list of ziplists */
-
-/* Defines related to the dump file format. To store 32 bits lengths for short
- * keys requires a lot of space, so we check the most significant 2 bits of
- * the first byte to interpreter the length:
- *
- * 00|000000 => if the two MSB are 00 the len is the 6 bits of this byte
- * 01|000000 00000000 =>  01, the len is 14 byes, 6 bits + 8 bits of next byte
- * 10|000000 [32 bit integer] => if it's 10, a full 32 bit len will follow
- * 11|000000 this means: specially encoded object will follow. The six bits
- *           number specify the kind of object that follows.
- *           See the RDB_ENC_* defines.
- *
- * Lengths up to 63 are stored using a single byte, most DB keys, and may
- * values, will fit inside. */
-#define RDB_6BITLEN 0
-#define RDB_14BITLEN 1
-#define RDB_32BITLEN 2
-#define RDB_ENCVAL 3
-#define RDB_LENERR UINT_MAX
-
-/* When a length of a string object stored on disk has the first two bits
- * set, the remaining two bits specify a special encoding for the object
- * accordingly to the following defines: */
-#define RDB_ENC_INT8 0        /* 8 bit signed integer */
-#define RDB_ENC_INT16 1       /* 16 bit signed integer */
-#define RDB_ENC_INT32 2       /* 32 bit signed integer */
-#define RDB_ENC_LZF 3         /* string compressed with FASTLZ */
+#define CMD_WRITE (1<<0)            /* "w" flag */
+#define CMD_READONLY (1<<1)         /* "r" flag */
+#define CMD_DENYOOM (1<<2)          /* "m" flag */
+#define CMD_MODULE (1<<3)           /* Command exported by module. */
+#define CMD_ADMIN (1<<4)            /* "a" flag */
+#define CMD_PUBSUB (1<<5)           /* "p" flag */
+#define CMD_NOSCRIPT (1<<6)         /* "s" flag */
+#define CMD_RANDOM (1<<7)           /* "R" flag */
+#define CMD_SORT_FOR_SCRIPT (1<<8)  /* "S" flag */
+#define CMD_LOADING (1<<9)          /* "l" flag */
+#define CMD_STALE (1<<10)           /* "t" flag */
+#define CMD_SKIP_MONITOR (1<<11)    /* "M" flag */
+#define CMD_ASKING (1<<12)          /* "k" flag */
+#define CMD_FAST (1<<13)            /* "F" flag */
+#define CMD_MODULE_GETKEYS (1<<14)  /* Use the modules getkeys interface. */
+#define CMD_MODULE_NO_CLUSTER (1<<15) /* Deny on Redis Cluster. */
 
 /* AOF states */
 #define AOF_OFF 0             /* AOF is off */
@@ -272,6 +232,7 @@ typedef long long mstime_t; /* millisecond time type. */
 #define CLIENT_REPLY_SKIP (1<<24)  /* Don't send just this reply. */
 #define CLIENT_LUA_DEBUG (1<<25)  /* Run EVAL in debug mode. */
 #define CLIENT_LUA_DEBUG_SYNC (1<<26)  /* EVAL debugging without fork() */
+#define CLIENT_MODULE (1<<27) /* Non connected client used by some module. */
 
 /* Client block type (btype field in client structure)
  * if CLIENT_BLOCKED flag is set. */
@@ -304,15 +265,13 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REPL_STATE_RECEIVE_AUTH 5 /* Wait for AUTH reply */
 #define REPL_STATE_SEND_PORT 6 /* Send REPLCONF listening-port */
 #define REPL_STATE_RECEIVE_PORT 7 /* Wait for REPLCONF reply */
-#define REPL_STATE_SEND_IP 8 /* Send REPLCONF ip-address */
-#define REPL_STATE_RECEIVE_IP 9 /* Wait for REPLCONF reply */
-#define REPL_STATE_SEND_CAPA 10 /* Send REPLCONF capa */
-#define REPL_STATE_RECEIVE_CAPA 11 /* Wait for REPLCONF reply */
-#define REPL_STATE_SEND_PSYNC 12 /* Send PSYNC */
-#define REPL_STATE_RECEIVE_PSYNC 13 /* Wait for PSYNC reply */
+#define REPL_STATE_SEND_CAPA 8 /* Send REPLCONF capa */
+#define REPL_STATE_RECEIVE_CAPA 9 /* Wait for REPLCONF reply */
+#define REPL_STATE_SEND_PSYNC 10 /* Send PSYNC */
+#define REPL_STATE_RECEIVE_PSYNC 11 /* Wait for PSYNC reply */
 /* --- End of handshake states --- */
-#define REPL_STATE_TRANSFER 14 /* Receiving .rdb from master */
-#define REPL_STATE_CONNECTED 15 /* Connected to master */
+#define REPL_STATE_TRANSFER 12 /* Receiving .rdb from master */
+#define REPL_STATE_CONNECTED 13 /* Connected to master */
 
 /* State of slaves from the POV of the master. Used in client->replstate.
  * In SEND_BULK and ONLINE state the slave receives new updates
@@ -457,13 +416,121 @@ typedef long long mstime_t; /* millisecond time type. */
 /* A redis object, that is a type able to hold a string / list / set */
 
 /* The actual Redis Object */
+#define OBJ_STRING 0
+#define OBJ_LIST 1
+#define OBJ_SET 2
+#define OBJ_ZSET 3
+#define OBJ_HASH 4
+
+/* The "module" object type is a special one that signals that the object
+ * is one directly managed by a Redis module. In this case the value points
+ * to a moduleValue struct, which contains the object value (which is only
+ * handled by the module itself) and the RedisModuleType struct which lists
+ * function pointers in order to serialize, deserialize, AOF-rewrite and
+ * free the object.
+ *
+ * Inside the RDB file, module types are encoded as OBJ_MODULE followed
+ * by a 64 bit module type ID, which has a 54 bits module-specific signature
+ * in order to dispatch the loading to the right module, plus a 10 bits
+ * encoding version. */
+#define OBJ_MODULE 5
+
+/* Extract encver / signature from a module type ID. */
+#define REDISMODULE_TYPE_ENCVER_BITS 10
+#define REDISMODULE_TYPE_ENCVER_MASK ((1<<REDISMODULE_TYPE_ENCVER_BITS)-1)
+#define REDISMODULE_TYPE_ENCVER(id) (id & REDISMODULE_TYPE_ENCVER_MASK)
+#define REDISMODULE_TYPE_SIGN(id) ((id & ~((uint64_t)REDISMODULE_TYPE_ENCVER_MASK)) >>REDISMODULE_TYPE_ENCVER_BITS)
+
+struct RedisModule;
+struct RedisModuleIO;
+struct RedisModuleDigest;
+struct redisObject;
+
+/* Each module type implementation should export a set of methods in order
+ * to serialize and deserialize the value in the RDB file, rewrite the AOF
+ * log, create the digest for "DEBUG DIGEST", and free the value when a key
+ * is deleted. */
+typedef void *(*moduleTypeLoadFunc)(struct RedisModuleIO *io, int encver);
+typedef void (*moduleTypeSaveFunc)(struct RedisModuleIO *io, void *value);
+typedef void (*moduleTypeRewriteFunc)(struct RedisModuleIO *io, struct redisObject *key, void *value);
+typedef void (*moduleTypeDigestFunc)(struct RedisModuleDigest *digest, void *value);
+typedef void (*moduleTypeFreeFunc)(void *value);
+
+/* The module type, which is referenced in each value of a given type, defines
+ * the methods and links to the module exporting the type. */
+typedef struct RedisModuleType {
+    uint64_t id; /* Higher 54 bits of type ID + 10 lower bits of encoding ver. */
+    struct RedisModule *module;
+    moduleTypeLoadFunc rdb_load;
+    moduleTypeSaveFunc rdb_save;
+    moduleTypeRewriteFunc aof_rewrite;
+    moduleTypeDigestFunc digest;
+    moduleTypeFreeFunc free;
+    char name[10]; /* 9 bytes name + null term. Charset: A-Z a-z 0-9 _- */
+} moduleType;
+
+/* In Redis objects 'robj' structures of type OBJ_MODULE, the value pointer
+ * is set to the following structure, referencing the moduleType structure
+ * in order to work with the value, and at the same time providing a raw
+ * pointer to the value, as created by the module commands operating with
+ * the module type.
+ *
+ * So for example in order to free such a value, it is possible to use
+ * the following code:
+ *
+ *  if (robj->type == OBJ_MODULE) {
+ *      moduleValue *mt = robj->ptr;
+ *      mt->type->free(mt->value);
+ *      zfree(mt); // We need to release this in-the-middle struct as well.
+ *  }
+ */
+typedef struct moduleValue {
+    moduleType *type;
+    void *value;
+} moduleValue;
+
+/* This is a wrapper for the 'rio' streams used inside rdb.c in Redis, so that
+ * the user does not have to take the total count of the written bytes nor
+ * to care about error conditions. */
+typedef struct RedisModuleIO {
+    size_t bytes;       /* Bytes read / written so far. */
+    rio *rio;           /* Rio stream. */
+    moduleType *type;   /* Module type doing the operation. */
+    int error;          /* True if error condition happened. */
+} RedisModuleIO;
+
+#define moduleInitIOContext(iovar,mtype,rioptr) do { \
+    iovar.rio = rioptr; \
+    iovar.type = mtype; \
+    iovar.bytes = 0; \
+    iovar.error = 0; \
+} while(0);
+
+/* Objects encoding. Some kind of objects like Strings and Hashes can be
+ * internally represented in multiple ways. The 'encoding' field of the object
+ * is set to one of this fields for this object. */
+#define OBJ_ENCODING_RAW 0     /* Raw representation */
+#define OBJ_ENCODING_INT 1     /* Encoded as integer */
+#define OBJ_ENCODING_HT 2      /* Encoded as hash table */
+#define OBJ_ENCODING_ZIPMAP 3  /* Encoded as zipmap */
+#define OBJ_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
+#define OBJ_ENCODING_ZIPLIST 5 /* Encoded as ziplist */
+#define OBJ_ENCODING_INTSET 6  /* Encoded as intset */
+#define OBJ_ENCODING_SKIPLIST 7  /* Encoded as skiplist */
+#define OBJ_ENCODING_EMBSTR 8  /* Embedded sds string encoding */
+#define OBJ_ENCODING_QUICKLIST 9 /* Encoded as linked list of ziplists */
+
 #define LRU_BITS 24
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
 #define LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
+
+#define OBJ_SHARED_REFCOUNT INT_MAX
 typedef struct redisObject {
     unsigned type:4;
     unsigned encoding:4;
-    unsigned lru:LRU_BITS; /* lru time (relative to server.lruclock) */
+    unsigned lru:LRU_BITS; /* LRU time (relative to server.lruclock) or
+                            * LFU data (least significant 8 bits frequency
+                            * and most significant 16 bits decreas time). */
     int refcount;
     void *ptr;
 } robj;
@@ -498,6 +565,21 @@ struct evictionPoolEntry {
     sds key;                    /* Key name. */
 };
 
+#ifdef __cplusplus
+/* Redis database representation. There are multiple databases identified
+ * by integers from 0 (the default database) up to the max configured
+ * database. The database number is the 'id' field in the structure. */
+typedef struct redisDb {
+    struct dict *dict;                 /* The keyspace for this DB */
+    struct dict *expires;              /* Timeout of keys with a timeout set */
+    struct dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
+    struct dict *ready_keys;           /* Blocked keys that received a PUSH */
+    struct dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
+    struct evictionPoolEntry *eviction_pool;    /* Eviction pool of keys */
+    int id;                     /* Database ID */
+    long long avg_ttl;          /* Average TTL, just for stats */
+} redisDb;
+#else
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
@@ -511,6 +593,7 @@ typedef struct redisDb {
     int id;                     /* Database ID */
     long long avg_ttl;          /* Average TTL, just for stats */
 } redisDb;
+#endif
 
 /* Client MULTI/EXEC state */
 typedef struct multiCmd {
@@ -566,7 +649,6 @@ typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     int fd;                 /* Client socket. */
     redisDb *db;            /* Pointer to currently SELECTed DB. */
-    int dictid;             /* ID of the currently SELECTed DB. */
     robj *name;             /* As set by CLIENT SETNAME. */
     sds querybuf;           /* Buffer we use to accumulate client queries. */
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
@@ -598,8 +680,7 @@ typedef struct client {
                                        copying this slave output buffer
                                        should use. */
     char replrunid[CONFIG_RUN_ID_SIZE+1]; /* Master run id if is a master. */
-    int slave_listening_port; /* As configured with: REPLCONF listening-port */
-    char slave_ip[NET_IP_STR_LEN]; /* Optionally given by REPLCONF ip-address */
+    int slave_listening_port; /* As configured with: SLAVECONF listening-port */
     int slave_capa;         /* Slave capabilities: SLAVE_CAPA_* bitwise OR. */
     multiState mstate;      /* MULTI/EXEC state */
     int btype;              /* Type of blocking op if CLIENT_BLOCKED. */
@@ -620,6 +701,12 @@ struct saveparam {
     int changes;
 };
 
+struct moduleLoadQueueEntry {
+    sds path;
+    int argc;
+    robj **argv;
+};
+
 struct sharedObjectsStruct {
     robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *cnegone, *pong, *space,
     *colon, *nullbulk, *nullmultibulk, *queued,
@@ -627,17 +714,18 @@ struct sharedObjectsStruct {
     *outofrangeerr, *noscripterr, *loadingerr, *slowscripterr, *bgsaveerr,
     *masterdownerr, *roslaveerr, *execaborterr, *noautherr, *noreplicaserr,
     *busykeyerr, *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
-    *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *rpop, *lpop,
-    *lpush, *emptyscan, *minstring, *maxstring,
+    *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *unlink,
+    *rpop, *lpop, *lpush, *emptyscan,
     *select[PROTO_SHARED_SELECT_CMDS],
     *integers[OBJ_SHARED_INTEGERS],
     *mbulkhdr[OBJ_SHARED_BULKHDR_LEN], /* "*<value>\r\n" */
     *bulkhdr[OBJ_SHARED_BULKHDR_LEN];  /* "$<value>\r\n" */
+    sds minstring, maxstring;
 };
 
 /* ZSETs use a specialized version of Skiplists */
 typedef struct zskiplistNode {
-    robj *obj;
+    sds ele;
     double score;
     struct zskiplistNode *backward;
     struct zskiplistLevel {
@@ -721,6 +809,9 @@ struct redisServer {
     int cronloops;              /* Number of times the cron function run */
     char runid[CONFIG_RUN_ID_SIZE+1];  /* ID always different at every exec. */
     int sentinel_mode;          /* True if this instance is a Sentinel. */
+    /* Modules */
+    dict *moduleapi;            /* Exported APIs dictionary for modules. */
+    list *loadmodule_queue;     /* List of modules to load at startup. */
     /* Networking */
     int port;                   /* TCP listening port */
     int tcp_backlog;            /* TCP listen() backlog */
@@ -842,7 +933,6 @@ struct redisServer {
     time_t lastbgsave_try;          /* Unix time of last attempted bgsave */
     time_t rdb_save_time_last;      /* Time used by last RDB save run. */
     time_t rdb_save_time_start;     /* Current RDB save start time. */
-    int rdb_bgsave_scheduled;       /* BGSAVE when possible if true. */
     int rdb_child_type;             /* Type of save by active child. */
     int lastbgsave_status;          /* C_OK or C_ERR */
     int stop_writes_on_bgsave_err;  /* Don't allow writes if can't BGSAVE */
@@ -895,10 +985,9 @@ struct redisServer {
     time_t repl_down_since; /* Unix time at which link with master went down */
     int repl_disable_tcp_nodelay;   /* Disable TCP_NODELAY after SYNC? */
     int slave_priority;             /* Reported in INFO and used by Sentinel. */
-    int slave_announce_port;        /* Give the master this listening port. */
-    char *slave_announce_ip;        /* Give the master this ip address. */
-    char repl_master_runid[CONFIG_RUN_ID_SIZE+1];  /* Master run id for PSYNC.*/
+    char repl_master_runid[CONFIG_RUN_ID_SIZE+1];  /* Master run id for PSYNC. */
     long long repl_master_initial_offset;         /* Master PSYNC offset. */
+    int repl_slave_lazy_flush;          /* Lazy FLUSHALL before loading DB? */
     /* Replication script cache. */
     dict *repl_scriptcache_dict;        /* SHA1 all slaves are aware of. */
     list *repl_scriptcache_fifo;        /* First in, first out LRU eviction. */
@@ -932,8 +1021,8 @@ struct redisServer {
     int list_max_ziplist_size;
     int list_compress_depth;
     /* time cache */
-    time_t unixtime;        /* Unix time sampled every cron cycle. */
-    long long mstime;       /* Like 'unixtime' but with milliseconds resolution. */
+    time_t unixtime;    /* Unix time sampled every cron cycle. */
+    long long mstime;   /* Like 'unixtime' but with milliseconds resolution. */
     /* Pubsub */
     dict *pubsub_channels;  /* Map channels to list of subscribed clients */
     list *pubsub_patterns;  /* A list of pubsub_patterns */
@@ -948,13 +1037,19 @@ struct redisServer {
     int cluster_slave_validity_factor; /* Slave max data age for failover. */
     int cluster_require_full_coverage; /* If true, put the cluster down if
                                           there is at least an uncovered slot.*/
+    char *cluster_announce_ip;  /* IP address to announce on cluster bus. */
+    int cluster_announce_port;     /* base port to announce on cluster bus. */
+    int cluster_announce_bus_port; /* bus port to announce on cluster bus. */
     /* Scripting */
     lua_State *lua; /* The Lua interpreter. We use just one for all clients */
     client *lua_client;   /* The "fake client" to query Redis from Lua */
     client *lua_caller;   /* The client running EVAL right now, or NULL */
+    client *v8_client;   /* The "fake client" to query Redis from V8 */
+    client *v8_caller;   /* The client running EVAL right now, or NULL */
     dict *lua_scripts;         /* A dictionary of SHA1 -> Lua scripts */
     mstime_t lua_time_limit;  /* Script timeout in milliseconds */
     mstime_t lua_time_start;  /* Start time of script, milliseconds time */
+    mstime_t v8_time_start;  /* Start time of script, milliseconds time */
     int lua_write_dirty;  /* True if a write command was called during the
                              execution of the current script. */
     int lua_random_dirty; /* True if a random command was called during the
@@ -966,12 +1061,16 @@ struct redisServer {
                              execution. */
     int lua_kill;         /* Kill the script if true. */
     int lua_always_replicate_commands; /* Default replication type. */
+    /* Lazy free */
+    int lazyfree_lazy_eviction;
+    int lazyfree_lazy_expire;
+    int lazyfree_lazy_server_del;
     /* Latency monitor */
     long long latency_monitor_threshold;
     dict *latency_events;
     /* Assert & bug reporting */
-    char *assert_failed;
-    char *assert_file;
+    const char *assert_failed;
+    const char *assert_file;
     int assert_line;
     int bug_report_start; /* True if bug report header was already logged. */
     int watchdog_period;  /* Software watchdog period in ms. 0 = off */
@@ -1065,6 +1164,7 @@ typedef struct {
 
 extern struct redisServer server;
 extern struct sharedObjectsStruct shared;
+extern dictType objectKeyPointerValueDictType;
 extern dictType setDictType;
 extern dictType zsetDictType;
 extern dictType clusterNodesDictType;
@@ -1074,10 +1174,20 @@ extern dictType shaScriptObjectDictType;
 extern double R_Zero, R_PosInf, R_NegInf, R_Nan;
 extern dictType hashDictType;
 extern dictType replScriptCacheDictType;
+extern dictType keyptrDictType;
+extern dictType modulesDictType;
 
 /*-----------------------------------------------------------------------------
  * Functions prototypes
  *----------------------------------------------------------------------------*/
+
+/* Modules */
+void moduleInitModulesSystem(void);
+int moduleLoad(const char *path, void **argv, int argc);
+void moduleLoadFromQueue(void);
+int *moduleGetCommandKeysViaAPI(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
+moduleType *moduleTypeLookupModuleByID(uint64_t id);
+void moduleTypeNameByID(char *name, uint64_t moduleid);
 
 /* Utils */
 long long ustime(void);
@@ -1130,7 +1240,7 @@ void freeClientsInAsyncFreeQueue(void);
 void asyncCloseClientOnOutputBufferLimitReached(client *c);
 int getClientType(client *c);
 int getClientTypeByName(char *name);
-char *getClientTypeName(int class);
+char *getClientTypeName(int _class);
 void flushSlavesOutputBuffers(void);
 void disconnectSlaves(void);
 int listenToPort(int port, int *fds, int *count);
@@ -1156,7 +1266,7 @@ void addReplyStatusFormat(client *c, const char *fmt, ...);
 void listTypeTryConversion(robj *subject, robj *value);
 void listTypePush(robj *subject, robj *value, int where);
 robj *listTypePop(robj *subject, int where);
-unsigned long listTypeLength(robj *subject);
+unsigned long listTypeLength(const robj *subject);
 listTypeIterator *listTypeInitIterator(robj *subject, long index, unsigned char direction);
 void listTypeReleaseIterator(listTypeIterator *li);
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry);
@@ -1185,6 +1295,7 @@ void execCommandPropagateMulti(client *c);
 void decrRefCount(robj *o);
 void decrRefCountVoid(void *o);
 void incrRefCount(robj *o);
+robj *makeObjectShared(robj *o);
 robj *resetRefCount(robj *obj);
 void freeStringObject(robj *o);
 void freeListObject(robj *o);
@@ -1195,7 +1306,8 @@ robj *createObject(int type, void *ptr);
 robj *createStringObject(const char *ptr, size_t len);
 robj *createRawStringObject(const char *ptr, size_t len);
 robj *createEmbeddedStringObject(const char *ptr, size_t len);
-robj *dupStringObject(robj *o);
+robj *dupStringObject(const robj *o);
+int isSdsRepresentableAsLongLong(sds s, long long *llval);
 int isObjectRepresentableAsLongLong(robj *o, long long *llongval);
 robj *tryObjectEncoding(robj *o);
 robj *getDecodedObject(robj *o);
@@ -1209,10 +1321,12 @@ robj *createIntsetObject(void);
 robj *createHashObject(void);
 robj *createZsetObject(void);
 robj *createZsetZiplistObject(void);
+robj *createModuleObject(moduleType *mt, void *value);
 int getLongFromObjectOrReply(client *c, robj *o, long *target, const char *msg);
 int checkType(client *c, robj *o, int type);
 int getLongLongFromObjectOrReply(client *c, robj *o, long long *target, const char *msg);
 int getDoubleFromObjectOrReply(client *c, robj *o, double *target, const char *msg);
+int getDoubleFromObject(const robj *o, double *target);
 int getLongLongFromObject(robj *o, long long *target);
 int getLongDoubleFromObject(robj *o, long double *target);
 int getLongDoubleFromObjectOrReply(client *c, robj *o, long double *target, const char *msg);
@@ -1274,6 +1388,21 @@ unsigned long aofRewriteBufferSize(void);
 
 /* Sorted sets data type */
 
+/* Input flags. */
+#define ZADD_NONE 0
+#define ZADD_INCR (1<<0)    /* Increment the score instead of setting it. */
+#define ZADD_NX (1<<1)      /* Don't touch elements not already existing. */
+#define ZADD_XX (1<<2)      /* Only touch elements already exisitng. */
+
+/* Output flags. */
+#define ZADD_NOP (1<<3)     /* Operation not performed because of conditionals.*/
+#define ZADD_NAN (1<<4)     /* Only touch elements already exisitng. */
+#define ZADD_ADDED (1<<5)   /* The element was new and was added. */
+#define ZADD_UPDATED (1<<6) /* The element already existed, score updated. */
+
+/* Flags only used by the ZADD command but not by zsetAdd() API: */
+#define ZADD_CH (1<<16)      /* Return num of elements added or updated. */
+
 /* Struct to hold a inclusive/exclusive range spec by score comparison. */
 typedef struct {
     double min, max;
@@ -1282,25 +1411,43 @@ typedef struct {
 
 /* Struct to hold an inclusive/exclusive range spec by lexicographic comparison. */
 typedef struct {
-    robj *min, *max;  /* May be set to shared.(minstring|maxstring) */
+    sds min, max;     /* May be set to shared.(minstring|maxstring) */
     int minex, maxex; /* are min or max exclusive? */
 } zlexrangespec;
 
 zskiplist *zslCreate(void);
 void zslFree(zskiplist *zsl);
-zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj);
-unsigned char *zzlInsert(unsigned char *zl, robj *ele, double score);
-int zslDelete(zskiplist *zsl, double score, robj *obj);
+zskiplistNode *zslInsert(zskiplist *zsl, double score, sds ele);
+unsigned char *zzlInsert(unsigned char *zl, sds ele, double score);
+int zslDelete(zskiplist *zsl, double score, sds ele, zskiplistNode **node);
 zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec *range);
 zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec *range);
 double zzlGetScore(unsigned char *sptr);
 void zzlNext(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
-unsigned int zsetLength(robj *zobj);
+unsigned char *zzlFirstInRange(unsigned char *zl, zrangespec *range);
+unsigned char *zzlLastInRange(unsigned char *zl, zrangespec *range);
+unsigned int zsetLength(const robj *zobj);
 void zsetConvert(robj *zobj, int encoding);
 void zsetConvertToZiplistIfNeeded(robj *zobj, size_t maxelelen);
-int zsetScore(robj *zobj, robj *member, double *score);
-unsigned long zslGetRank(zskiplist *zsl, double score, robj *o);
+int zsetScore(robj *zobj, sds member, double *score);
+unsigned long zslGetRank(zskiplist *zsl, double score, sds o);
+int zsetAdd(robj *zobj, double score, sds ele, int *flags, double *newscore);
+long zsetRank(robj *zobj, sds ele, int reverse);
+int zsetDel(robj *zobj, sds ele);
+sds ziplistGetObject(unsigned char *sptr);
+int zslValueGteMin(double value, zrangespec *spec);
+int zslValueLteMax(double value, zrangespec *spec);
+void zslFreeLexRange(zlexrangespec *spec);
+int zslParseLexRange(robj *min, robj *max, zlexrangespec *spec);
+unsigned char *zzlFirstInLexRange(unsigned char *zl, zlexrangespec *range);
+unsigned char *zzlLastInLexRange(unsigned char *zl, zlexrangespec *range);
+zskiplistNode *zslFirstInLexRange(zskiplist *zsl, zlexrangespec *range);
+zskiplistNode *zslLastInLexRange(zskiplist *zsl, zlexrangespec *range);
+int zzlLexValueGteMin(unsigned char *p, zlexrangespec *spec);
+int zzlLexValueLteMax(unsigned char *p, zlexrangespec *spec);
+int zslLexValueGteMin(sds value, zlexrangespec *spec);
+int zslLexValueLteMax(sds value, zlexrangespec *spec);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);
@@ -1343,28 +1490,30 @@ const char *evictPolicyToString(void);
 int restartServer(int flags, mstime_t delay);
 
 /* Set data type */
-robj *setTypeCreate(robj *value);
-int setTypeAdd(robj *subject, robj *value);
-int setTypeRemove(robj *subject, robj *value);
-int setTypeIsMember(robj *subject, robj *value);
+robj *setTypeCreate(sds value);
+int setTypeAdd(robj *subject, sds value);
+int setTypeRemove(robj *subject, sds value);
+int setTypeIsMember(robj *subject, sds value);
 setTypeIterator *setTypeInitIterator(robj *subject);
 void setTypeReleaseIterator(setTypeIterator *si);
-int setTypeNext(setTypeIterator *si, robj **objele, int64_t *llele);
-robj *setTypeNextObject(setTypeIterator *si);
-int setTypeRandomElement(robj *setobj, robj **objele, int64_t *llele);
+int setTypeNext(setTypeIterator *si, sds *sdsele, int64_t *llele);
+sds setTypeNextObject(setTypeIterator *si);
+int setTypeRandomElement(robj *setobj, sds *sdsele, int64_t *llele);
 unsigned long setTypeRandomElements(robj *set, unsigned long count, robj *aux_set);
-unsigned long setTypeSize(robj *subject);
+unsigned long setTypeSize(const robj *subject);
 void setTypeConvert(robj *subject, int enc);
 
 /* Hash data type */
+#define HASH_SET_TAKE_FIELD (1<<0)
+#define HASH_SET_TAKE_VALUE (1<<1)
+#define HASH_SET_COPY 0
+
 void hashTypeConvert(robj *o, int enc);
 void hashTypeTryConversion(robj *subject, robj **argv, int start, int end);
 void hashTypeTryObjectEncoding(robj *subject, robj **o1, robj **o2);
-robj *hashTypeGetObject(robj *o, robj *key);
-int hashTypeExists(robj *o, robj *key);
-int hashTypeSet(robj *o, robj *key, robj *value);
-int hashTypeDelete(robj *o, robj *key);
-unsigned long hashTypeLength(robj *o);
+int hashTypeExists(robj *o, sds key);
+int hashTypeDelete(robj *o, sds key);
+unsigned long hashTypeLength(const robj *o);
 hashTypeIterator *hashTypeInitIterator(robj *subject);
 void hashTypeReleaseIterator(hashTypeIterator *hi);
 int hashTypeNext(hashTypeIterator *hi);
@@ -1372,9 +1521,12 @@ void hashTypeCurrentFromZiplist(hashTypeIterator *hi, int what,
                                 unsigned char **vstr,
                                 unsigned int *vlen,
                                 long long *vll);
-void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, robj **dst);
-robj *hashTypeCurrentObject(hashTypeIterator *hi, int what);
+sds hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what);
+void hashTypeCurrentObject(hashTypeIterator *hi, int what, unsigned char **vstr, unsigned int *vlen, long long *vll);
+sds hashTypeCurrentObjectNewSds(hashTypeIterator *hi, int what);
 robj *hashTypeLookupWriteOrCreate(client *c, robj *key);
+robj *hashTypeGetValueObject(robj *o, sds field);
+int hashTypeSet(robj *o, sds field, sds value, int flags);
 
 /* Pub / Sub */
 int pubsubUnsubscribeAllChannels(client *c, int notify);
@@ -1398,7 +1550,7 @@ int rewriteConfig(char *path);
 
 /* db.c -- Keyspace access API */
 int removeExpire(redisDb *db, robj *key);
-void propagateExpire(redisDb *db, robj *key);
+void propagateExpire(redisDb *db, robj *key, int lazy);
 int expireIfNeeded(redisDb *db, robj *key);
 long long getExpire(redisDb *db, robj *key);
 void setExpire(redisDb *db, robj *key, long long when);
@@ -1415,9 +1567,14 @@ void dbOverwrite(redisDb *db, robj *key, robj *val);
 void setKey(redisDb *db, robj *key, robj *val);
 int dbExists(redisDb *db, robj *key);
 robj *dbRandomKey(redisDb *db);
+int dbSyncDelete(redisDb *db, robj *key);
 int dbDelete(redisDb *db, robj *key);
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o);
-long long emptyDb(void(callback)(void*));
+
+#define EMPTYDB_NO_FLAGS 0      /* No flags. */
+#define EMPTYDB_ASYNC (1<<0)    /* Reclaim memory in another thread. */
+long long emptyDb(int dbnum, int flags, void(callback)(void*));
+
 int selectDb(client *c, int id);
 void signalModifiedKey(redisDb *db, robj *key);
 void signalFlushedDb(int dbid);
@@ -1427,6 +1584,13 @@ unsigned int delKeysInSlot(unsigned int hashslot);
 int verifyClusterConfigWithData(void);
 void scanGenericCommand(client *c, robj *o, unsigned long cursor);
 int parseScanCursorOrReply(client *c, robj *o, unsigned long *cursor);
+void slotToKeyAdd(robj *key);
+void slotToKeyDel(robj *key);
+void slotToKeyFlush(void);
+int dbAsyncDelete(redisDb *db, robj *key);
+void emptyDbAsync(redisDb *db);
+void slotToKeyFlushAsync(void);
+size_t lazyfreeGetPendingObjectsCount(void);
 
 /* API to get key arguments from commands */
 int *getKeysFromCommand(struct redisCommand *cmd, robj **argv, int argc, int *numkeys);
@@ -1454,7 +1618,7 @@ void sentinelIsRunning(void);
 
 /* redis-check-rdb */
 int redis_check_rdb(char *rdbfilename);
-int redis_check_rdb_main(int argc, char **argv);
+int redis_check_rdb_main(char **argv, int argc);
 
 /* Scripting */
 void scriptingInit(int setup);
@@ -1486,6 +1650,7 @@ void setexCommand(client *c);
 void psetexCommand(client *c);
 void getCommand(client *c);
 void delCommand(client *c);
+void unlinkCommand(client *c);
 void existsCommand(client *c);
 void setbitCommand(client *c);
 void getbitCommand(client *c);
@@ -1645,6 +1810,7 @@ void pfcountCommand(client *c);
 void pfmergeCommand(client *c);
 void pfdebugCommand(client *c);
 void latencyCommand(client *c);
+void moduleCommand(client *c);
 
 #if defined(__GNUC__)
 void *calloc(size_t count, size_t size) __attribute__ ((deprecated));
@@ -1654,11 +1820,11 @@ void *realloc(void *ptr, size_t size) __attribute__ ((deprecated));
 #endif
 
 /* Debugging stuff */
-void _serverAssertWithInfo(client *c, robj *o, char *estr, char *file, int line);
-void _serverAssert(char *estr, char *file, int line);
-void _serverPanic(char *msg, char *file, int line);
+void _serverAssertWithInfo(const client *c, const robj *o, const char *estr, const char *file, int line);
+void _serverAssert(const char *estr, const char *file, int line);
+void _serverPanic(const char *msg, const char *file, int line);
 void bugReportStart(void);
-void serverLogObjectDebugInfo(robj *o);
+void serverLogObjectDebugInfo(const robj *o);
 void sigsegvHandler(int sig, siginfo_t *info, void *secret);
 sds genRedisInfoString(char *section);
 void enableWatchdog(int period);

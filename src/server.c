@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2012, Salvatore Sanfilippo <antirez at gmail dot com>
+ * Copyright (c) 2009-2016, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -54,6 +54,7 @@
 #include <sys/utsname.h>
 #include <locale.h>
 #include <sys/socket.h>
+#include "scripting-v8.h"
 
 /* Our shared "common" objects */
 
@@ -123,6 +124,7 @@ struct redisServer server; /* server global state */
  *    are not fast commands.
  */
 struct redisCommand redisCommandTable[] = {
+    {"module",moduleCommand,-2,"as",0,NULL,1,1,1,0,0},
     {"get",getCommand,2,"rF",0,NULL,1,1,1,0,0},
     {"set",setCommand,-3,"wm",0,NULL,1,1,1,0,0},
     {"setnx",setnxCommand,3,"wmF",0,NULL,1,1,1,0,0},
@@ -131,6 +133,7 @@ struct redisCommand redisCommandTable[] = {
     {"append",appendCommand,3,"wm",0,NULL,1,1,1,0,0},
     {"strlen",strlenCommand,2,"rF",0,NULL,1,1,1,0,0},
     {"del",delCommand,-2,"w",0,NULL,1,-1,1,0,0},
+    {"unlink",unlinkCommand,-2,"wF",0,NULL,1,-1,1,0,0},
     {"exists",existsCommand,-2,"rF",0,NULL,1,-1,1,0,0},
     {"setbit",setbitCommand,4,"wm",0,NULL,1,1,1,0,0},
     {"getbit",getbitCommand,3,"rF",0,NULL,1,1,1,0,0},
@@ -143,8 +146,8 @@ struct redisCommand redisCommandTable[] = {
     {"mget",mgetCommand,-2,"r",0,NULL,1,-1,1,0,0},
     {"rpush",rpushCommand,-3,"wmF",0,NULL,1,1,1,0,0},
     {"lpush",lpushCommand,-3,"wmF",0,NULL,1,1,1,0,0},
-    {"rpushx",rpushxCommand,3,"wmF",0,NULL,1,1,1,0,0},
-    {"lpushx",lpushxCommand,3,"wmF",0,NULL,1,1,1,0,0},
+    {"rpushx",rpushxCommand,-3,"wmF",0,NULL,1,1,1,0,0},
+    {"lpushx",lpushxCommand,-3,"wmF",0,NULL,1,1,1,0,0},
     {"linsert",linsertCommand,5,"wm",0,NULL,1,1,1,0,0},
     {"rpop",rpopCommand,2,"wF",0,NULL,1,1,1,0,0},
     {"lpop",lpopCommand,2,"wF",0,NULL,1,1,1,0,0},
@@ -231,7 +234,7 @@ struct redisCommand redisCommandTable[] = {
     {"ping",pingCommand,-1,"tF",0,NULL,0,0,0,0,0},
     {"echo",echoCommand,2,"F",0,NULL,0,0,0,0,0},
     {"save",saveCommand,1,"as",0,NULL,0,0,0,0,0},
-    {"bgsave",bgsaveCommand,-1,"a",0,NULL,0,0,0,0,0},
+    {"bgsave",bgsaveCommand,1,"a",0,NULL,0,0,0,0,0},
     {"bgrewriteaof",bgrewriteaofCommand,1,"a",0,NULL,0,0,0,0,0},
     {"shutdown",shutdownCommand,-1,"alt",0,NULL,0,0,0,0,0},
     {"lastsave",lastsaveCommand,1,"RF",0,NULL,0,0,0,0,0},
@@ -242,8 +245,8 @@ struct redisCommand redisCommandTable[] = {
     {"sync",syncCommand,1,"ars",0,NULL,0,0,0,0,0},
     {"psync",syncCommand,3,"ars",0,NULL,0,0,0,0,0},
     {"replconf",replconfCommand,-1,"aslt",0,NULL,0,0,0,0,0},
-    {"flushdb",flushdbCommand,1,"w",0,NULL,0,0,0,0,0},
-    {"flushall",flushallCommand,1,"w",0,NULL,0,0,0,0,0},
+    {"flushdb",flushdbCommand,-1,"w",0,NULL,0,0,0,0,0},
+    {"flushall",flushallCommand,-1,"w",0,NULL,0,0,0,0,0},
     {"sort",sortCommand,-2,"wm",0,sortGetKeys,1,1,1,0,0},
     {"info",infoCommand,-1,"lt",0,NULL,0,0,0,0,0},
     {"monitor",monitorCommand,1,"as",0,NULL,0,0,0,0,0},
@@ -274,6 +277,7 @@ struct redisCommand redisCommandTable[] = {
     {"object",objectCommand,3,"r",0,NULL,2,2,2,0,0},
     {"client",clientCommand,-2,"as",0,NULL,0,0,0,0,0},
     {"eval",evalCommand,-3,"s",0,evalGetKeys,0,0,0,0,0},
+    {"jseval",jsEvalCommand,2,"s",0,NULL,0,0,0,0,0},
     {"evalsha",evalShaCommand,-3,"s",0,evalGetKeys,0,0,0,0,0},
     {"slowlog",slowlogCommand,-2,"a",0,NULL,0,0,0,0,0},
     {"script",scriptCommand,-2,"s",0,NULL,0,0,0,0,0},
@@ -460,7 +464,7 @@ void dictObjectDestructor(void *privdata, void *val)
 {
     DICT_NOTUSED(privdata);
 
-    if (val == NULL) return; /* Values of swapped out keys as set to NULL */
+    if (val == NULL) return; /* Lazy freeing will set value to NULL. */
     decrRefCount(val);
 }
 
@@ -532,8 +536,9 @@ unsigned int dictEncObjHash(const void *key) {
     }
 }
 
-/* Sets type hash table */
-dictType setDictType = {
+/* Generic hash table type where keys are Redis Objects, Values
+ * dummy pointers. */
+dictType objectKeyPointerValueDictType = {
     dictEncObjHash,            /* hash function */
     NULL,                      /* key dup */
     NULL,                      /* val dup */
@@ -542,13 +547,23 @@ dictType setDictType = {
     NULL                       /* val destructor */
 };
 
-/* Sorted sets hash (note: a skiplist is used in addition to the hash table) */
-dictType zsetDictType = {
-    dictEncObjHash,            /* hash function */
+/* Set dictionary type. Keys are SDS strings, values are ot used. */
+dictType setDictType = {
+    dictSdsHash,               /* hash function */
     NULL,                      /* key dup */
     NULL,                      /* val dup */
-    dictEncObjKeyCompare,      /* key compare */
-    dictObjectDestructor, /* key destructor */
+    dictSdsKeyCompare,         /* key compare */
+    dictSdsDestructor,         /* key destructor */
+    NULL                       /* val destructor */
+};
+
+/* Sorted sets hash (note: a skiplist is used in addition to the hash table) */
+dictType zsetDictType = {
+    dictSdsHash,               /* hash function */
+    NULL,                      /* key dup */
+    NULL,                      /* val dup */
+    dictSdsKeyCompare,         /* key compare */
+    NULL,                      /* Note: SDS string shared & freed by skiplist */
     NULL                       /* val destructor */
 };
 
@@ -569,37 +584,37 @@ dictType shaScriptObjectDictType = {
     NULL,                       /* val dup */
     dictSdsKeyCaseCompare,      /* key compare */
     dictSdsDestructor,          /* key destructor */
-    dictObjectDestructor   /* val destructor */
+    dictObjectDestructor        /* val destructor */
 };
 
 /* Db->expires */
 dictType keyptrDictType = {
-    dictSdsHash,               /* hash function */
-    NULL,                      /* key dup */
-    NULL,                      /* val dup */
-    dictSdsKeyCompare,         /* key compare */
-    NULL,                      /* key destructor */
-    NULL                       /* val destructor */
+    dictSdsHash,                /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCompare,          /* key compare */
+    NULL,                       /* key destructor */
+    NULL                        /* val destructor */
 };
 
 /* Command table. sds string -> command struct pointer. */
 dictType commandTableDictType = {
-    dictSdsCaseHash,           /* hash function */
-    NULL,                      /* key dup */
-    NULL,                      /* val dup */
-    dictSdsKeyCaseCompare,     /* key compare */
-    dictSdsDestructor,         /* key destructor */
-    NULL                       /* val destructor */
+    dictSdsCaseHash,            /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCaseCompare,      /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    NULL                        /* val destructor */
 };
 
 /* Hash type hash table (note that small hashes are represented with ziplists) */
 dictType hashDictType = {
-    dictEncObjHash,             /* hash function */
+    dictSdsHash,                /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
-    dictEncObjKeyCompare,       /* key compare */
-    dictObjectDestructor,  /* key destructor */
-    dictObjectDestructor   /* val destructor */
+    dictSdsKeyCompare,          /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    dictSdsDestructor           /* val destructor */
 };
 
 /* Keylist hash table type has unencoded redis objects as keys and
@@ -610,7 +625,7 @@ dictType keylistDictType = {
     NULL,                       /* key dup */
     NULL,                       /* val dup */
     dictObjKeyCompare,          /* key compare */
-    dictObjectDestructor,  /* key destructor */
+    dictObjectDestructor,       /* key destructor */
     dictListDestructor          /* val destructor */
 };
 
@@ -629,6 +644,18 @@ dictType clusterNodesDictType = {
  * we can re-add this node. The goal is to avoid readding a removed
  * node for some time. */
 dictType clusterNodesBlackListDictType = {
+    dictSdsCaseHash,            /* hash function */
+    NULL,                       /* key dup */
+    NULL,                       /* val dup */
+    dictSdsKeyCaseCompare,      /* key compare */
+    dictSdsDestructor,          /* key destructor */
+    NULL                        /* val destructor */
+};
+
+/* Cluster re-addition blacklist. This maps node IDs to the time
+ * we can re-add this node. The goal is to avoid readding a removed
+ * node for some time. */
+dictType modulesDictType = {
     dictSdsCaseHash,            /* hash function */
     NULL,                       /* key dup */
     NULL,                       /* val dup */
@@ -730,8 +757,11 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
         sds key = dictGetKey(de);
         robj *keyobj = createStringObject(key,sdslen(key));
 
-        propagateExpire(db,keyobj);
-        dbDelete(db,keyobj);
+        propagateExpire(db,keyobj,server.lazyfree_lazy_expire);
+        if (server.lazyfree_lazy_expire)
+            dbAsyncDelete(db,keyobj);
+        else
+            dbSyncDelete(db,keyobj);
         notifyKeyspaceEvent(NOTIFY_EXPIRED,
             "expired",keyobj,db->id);
         decrRefCount(keyobj);
@@ -1267,8 +1297,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Clear the paused clients flag if needed. */
     clientsArePaused(); /* Don't check return value, just use the side effect. */
 
-    /* Replication cron function -- used to reconnect to master,
-     * detect transfer failures, start background RDB transfers and so forth. */
+    /* Replication cron function -- used to reconnect to master and
+     * to detect transfer failures. */
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -1284,22 +1314,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Cleanup expired MIGRATE cached sockets. */
     run_with_period(1000) {
         migrateCloseTimedoutSockets();
-    }
-
-    /* Start a scheduled BGSAVE if the corresponding flag is set. This is
-     * useful when we are forced to postpone a BGSAVE because an AOF
-     * rewrite is in progress.
-     *
-     * Note: this code must be after the replicationCron() call above so
-     * make sure when refactoring this file to keep this order. This is useful
-     * because we want to give priority to RDB savings for replication. */
-    if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
-        server.rdb_bgsave_scheduled &&
-        (server.unixtime-server.lastbgsave_try > CONFIG_BGSAVE_RETRY_DELAY ||
-         server.lastbgsave_status == C_OK))
-    {
-        if (rdbSaveBackground(server.rdb_filename) == C_OK)
-            server.rdb_bgsave_scheduled = 0;
     }
 
     server.cronloops++;
@@ -1425,11 +1439,13 @@ void createSharedObjects(void) {
     shared.psubscribebulk = createStringObject("$10\r\npsubscribe\r\n",17);
     shared.punsubscribebulk = createStringObject("$12\r\npunsubscribe\r\n",19);
     shared.del = createStringObject("DEL",3);
+    shared.unlink = createStringObject("UNLINK",6);
     shared.rpop = createStringObject("RPOP",4);
     shared.lpop = createStringObject("LPOP",4);
     shared.lpush = createStringObject("LPUSH",5);
     for (j = 0; j < OBJ_SHARED_INTEGERS; j++) {
-        shared.integers[j] = createObject(OBJ_STRING,(void*)(long)j);
+        shared.integers[j] =
+            makeObjectShared(createObject(OBJ_STRING,(void*)(long)j));
         shared.integers[j]->encoding = OBJ_ENCODING_INT;
     }
     for (j = 0; j < OBJ_SHARED_BULKHDR_LEN; j++) {
@@ -1442,8 +1458,8 @@ void createSharedObjects(void) {
      * actually used for their value but as a special object meaning
      * respectively the minimum possible string and the maximum possible
      * string in string comparisons for the ZRANGEBYLEX command. */
-    shared.minstring = createStringObject("minstring",9);
-    shared.maxstring = createStringObject("maxstring",9);
+    shared.minstring = sdsnew("minstring");
+    shared.maxstring = sdsnew("maxstring");
 }
 
 void initServerConfig(void) {
@@ -1518,19 +1534,21 @@ void initServerConfig(void) {
     server.zset_max_ziplist_value = OBJ_ZSET_MAX_ZIPLIST_VALUE;
     server.hll_sparse_max_bytes = CONFIG_DEFAULT_HLL_SPARSE_MAX_BYTES;
     server.shutdown_asap = 0;
-    server.repl_ping_slave_period = CONFIG_DEFAULT_REPL_PING_SLAVE_PERIOD;
-    server.repl_timeout = CONFIG_DEFAULT_REPL_TIMEOUT;
-    server.repl_min_slaves_to_write = CONFIG_DEFAULT_MIN_SLAVES_TO_WRITE;
-    server.repl_min_slaves_max_lag = CONFIG_DEFAULT_MIN_SLAVES_MAX_LAG;
     server.cluster_enabled = 0;
     server.cluster_node_timeout = CLUSTER_DEFAULT_NODE_TIMEOUT;
     server.cluster_migration_barrier = CLUSTER_DEFAULT_MIGRATION_BARRIER;
     server.cluster_slave_validity_factor = CLUSTER_DEFAULT_SLAVE_VALIDITY;
     server.cluster_require_full_coverage = CLUSTER_DEFAULT_REQUIRE_FULL_COVERAGE;
     server.cluster_configfile = zstrdup(CONFIG_DEFAULT_CLUSTER_CONFIG_FILE);
+    server.cluster_announce_ip = CONFIG_DEFAULT_CLUSTER_ANNOUNCE_IP;
+    server.cluster_announce_port = CONFIG_DEFAULT_CLUSTER_ANNOUNCE_PORT;
+    server.cluster_announce_bus_port = CONFIG_DEFAULT_CLUSTER_ANNOUNCE_BUS_PORT;
     server.migrate_cached_sockets = dictCreate(&migrateCacheDictType,NULL);
     server.next_client_id = 1; /* Client IDs, start from 1 .*/
     server.loading_process_events_interval_bytes = (1024*1024*2);
+    server.lazyfree_lazy_eviction = CONFIG_DEFAULT_LAZYFREE_LAZY_EVICTION;
+    server.lazyfree_lazy_expire = CONFIG_DEFAULT_LAZYFREE_LAZY_EXPIRE;
+    server.lazyfree_lazy_server_del = CONFIG_DEFAULT_LAZYFREE_LAZY_SERVER_DEL;
 
     server.lruclock = getLRUClock();
     resetServerSaveParams();
@@ -1538,6 +1556,7 @@ void initServerConfig(void) {
     appendServerSaveParams(60*60,1);  /* save after 1 hour and 1 change */
     appendServerSaveParams(300,100);  /* save after 5 minutes and 100 changes */
     appendServerSaveParams(60,10000); /* save after 1 minute and 10000 changes */
+
     /* Replication related */
     server.masterauth = NULL;
     server.masterhost = NULL;
@@ -1549,13 +1568,16 @@ void initServerConfig(void) {
     server.repl_syncio_timeout = CONFIG_REPL_SYNCIO_TIMEOUT;
     server.repl_serve_stale_data = CONFIG_DEFAULT_SLAVE_SERVE_STALE_DATA;
     server.repl_slave_ro = CONFIG_DEFAULT_SLAVE_READ_ONLY;
+    server.repl_slave_lazy_flush = CONFIG_DEFAULT_SLAVE_LAZY_FLUSH;
     server.repl_down_since = 0; /* Never connected, repl is down since EVER. */
     server.repl_disable_tcp_nodelay = CONFIG_DEFAULT_REPL_DISABLE_TCP_NODELAY;
     server.repl_diskless_sync = CONFIG_DEFAULT_REPL_DISKLESS_SYNC;
     server.repl_diskless_sync_delay = CONFIG_DEFAULT_REPL_DISKLESS_SYNC_DELAY;
+    server.repl_ping_slave_period = CONFIG_DEFAULT_REPL_PING_SLAVE_PERIOD;
+    server.repl_timeout = CONFIG_DEFAULT_REPL_TIMEOUT;
+    server.repl_min_slaves_to_write = CONFIG_DEFAULT_MIN_SLAVES_TO_WRITE;
+    server.repl_min_slaves_max_lag = CONFIG_DEFAULT_MIN_SLAVES_MAX_LAG;
     server.slave_priority = CONFIG_DEFAULT_SLAVE_PRIORITY;
-    server.slave_announce_ip = CONFIG_DEFAULT_SLAVE_ANNOUNCE_IP;
-    server.slave_announce_port = CONFIG_DEFAULT_SLAVE_ANNOUNCE_PORT;
     server.master_repl_offset = 0;
 
     /* Replication partial resync backlog */
@@ -1776,7 +1798,6 @@ int listenToPort(int port, int *fds, int *count) {
     if (server.bindaddr_count == 0) server.bindaddr[0] = NULL;
     for (j = 0; j < server.bindaddr_count || j == 0; j++) {
         if (server.bindaddr[j] == NULL) {
-            int unsupported = 0;
             /* Bind * for both IPv6 and IPv4, we enter here only if
              * server.bindaddr_count == 0. */
             fds[*count] = anetTcp6Server(server.neterr,port,NULL,
@@ -1784,27 +1805,19 @@ int listenToPort(int port, int *fds, int *count) {
             if (fds[*count] != ANET_ERR) {
                 anetNonBlock(NULL,fds[*count]);
                 (*count)++;
-            } else if (errno == EAFNOSUPPORT) {
-                unsupported++;
-                serverLog(LL_WARNING,"Not listening to IPv6: unsupproted");
-            }
 
-            if (*count == 1 || unsupported) {
                 /* Bind the IPv4 address as well. */
                 fds[*count] = anetTcpServer(server.neterr,port,NULL,
                     server.tcp_backlog);
                 if (fds[*count] != ANET_ERR) {
                     anetNonBlock(NULL,fds[*count]);
                     (*count)++;
-                } else if (errno == EAFNOSUPPORT) {
-                    unsupported++;
-                    serverLog(LL_WARNING,"Not listening to IPv4: unsupproted");
                 }
             }
             /* Exit the loop if we were able to bind * on IPv4 and IPv6,
              * otherwise fds[*count] will be ANET_ERR and we'll print an
              * error and return to the caller with an error. */
-            if (*count + unsupported == 2) break;
+            if (*count == 2) break;
         } else if (strchr(server.bindaddr[j],':')) {
             /* Bind IPv6 address. */
             fds[*count] = anetTcp6Server(server.neterr,port,server.bindaddr[j],
@@ -1917,7 +1930,7 @@ void initServer(void) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
         server.db[j].blocking_keys = dictCreate(&keylistDictType,NULL);
-        server.db[j].ready_keys = dictCreate(&setDictType,NULL);
+        server.db[j].ready_keys = dictCreate(&objectKeyPointerValueDictType,NULL);
         server.db[j].watched_keys = dictCreate(&keylistDictType,NULL);
         server.db[j].eviction_pool = evictionPoolAlloc();
         server.db[j].id = j;
@@ -1931,7 +1944,6 @@ void initServer(void) {
     server.rdb_child_pid = -1;
     server.aof_child_pid = -1;
     server.rdb_child_type = RDB_CHILD_TYPE_NONE;
-    server.rdb_bgsave_scheduled = 0;
     aofRewriteBufferReset();
     server.aof_buf = sdsempty();
     server.lastsave = time(NULL); /* At startup we consider the DB saved. */
@@ -1950,10 +1962,11 @@ void initServer(void) {
     server.repl_good_slaves_count = 0;
     updateCachedTime();
 
-    /* Create the serverCron() time event, that's our main way to process
-     * background operations. */
-    if(aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
-        serverPanic("Can't create the serverCron time event.");
+    /* Create the timer callback, this is our way to process many background
+     * operations incrementally, like clients timeout, eviction of unaccessed
+     * expired keys and so forth. */
+    if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
+        serverPanic("Can't create event loop timers.");
         exit(1);
     }
 
@@ -2242,6 +2255,7 @@ void call(client *c, int flags) {
     /* Initialization: clear the flags that must be set by the command on
      * demand, and initialize the array for additional commands propagation. */
     c->flags &= ~(CLIENT_FORCE_AOF|CLIENT_FORCE_REPL|CLIENT_PREVENT_PROP);
+    redisOpArray prev_also_propagate = server.also_propagate;
     redisOpArrayInit(&server.also_propagate);
 
     /* Call the command. */
@@ -2337,6 +2351,7 @@ void call(client *c, int flags) {
         }
         redisOpArrayFree(&server.also_propagate);
     }
+    server.also_propagate = prev_also_propagate;
     server.stat_numcommands++;
 }
 
@@ -2615,6 +2630,7 @@ int prepareForShutdown(int flags) {
 
     /* Close the listening sockets. Apparently this allows faster restarts. */
     closeListeningSockets(1);
+    shutdownV8();
     serverLog(LL_WARNING,"%s is now ready to exit, bye bye...",
         server.sentinel_mode ? "Sentinel" : "Redis");
     return C_OK;
@@ -2750,7 +2766,9 @@ void addReplyCommand(client *c, struct redisCommand *cmd) {
         flagcount += addReplyCommandFlag(c,cmd,CMD_SKIP_MONITOR, "skip_monitor");
         flagcount += addReplyCommandFlag(c,cmd,CMD_ASKING, "asking");
         flagcount += addReplyCommandFlag(c,cmd,CMD_FAST, "fast");
-        if (cmd->getkeys_proc) {
+        if ((cmd->getkeys_proc && !(cmd->flags & CMD_MODULE)) ||
+            cmd->flags & CMD_MODULE_GETKEYS)
+        {
             addReplyStatus(c, "movablekeys");
             flagcount += 1;
         }
@@ -2976,7 +2994,8 @@ sds genRedisInfoString(char *section) {
             "maxmemory_human:%s\r\n"
             "maxmemory_policy:%s\r\n"
             "mem_fragmentation_ratio:%.2f\r\n"
-            "mem_allocator:%s\r\n",
+            "mem_allocator:%s\r\n"
+            "lazyfree_pending_objects:%zu\r\n",
             zmalloc_used,
             hmem,
             server.resident_set_size,
@@ -2991,7 +3010,8 @@ sds genRedisInfoString(char *section) {
             maxmemory_hmem,
             evict_policy,
             zmalloc_get_fragmentation_ratio(server.resident_set_size),
-            ZMALLOC_LIB
+            ZMALLOC_LIB,
+            lazyfreeGetPendingObjectsCount()
             );
     }
 
@@ -3202,15 +3222,11 @@ sds genRedisInfoString(char *section) {
             while((ln = listNext(&li))) {
                 client *slave = listNodeValue(ln);
                 char *state = NULL;
-                char ip[NET_IP_STR_LEN], *slaveip = slave->slave_ip;
+                char ip[NET_IP_STR_LEN];
                 int port;
                 long lag = 0;
 
-                if (slaveip[0] == '\0') {
-                    if (anetPeerToString(slave->fd,ip,sizeof(ip),&port) == -1)
-                        continue;
-                    slaveip = ip;
-                }
+                if (anetPeerToString(slave->fd,ip,sizeof(ip),&port) == -1) continue;
                 switch(slave->replstate) {
                 case SLAVE_STATE_WAIT_BGSAVE_START:
                 case SLAVE_STATE_WAIT_BGSAVE_END:
@@ -3230,7 +3246,7 @@ sds genRedisInfoString(char *section) {
                 info = sdscatprintf(info,
                     "slave%d:ip=%s,port=%d,state=%s,"
                     "offset=%lld,lag=%ld\r\n",
-                    slaveid,slaveip,slave->slave_listening_port,state,
+                    slaveid,ip,slave->slave_listening_port,state,
                     slave->repl_ack_off, lag);
                 slaveid++;
             }
@@ -3455,13 +3471,19 @@ void evictionPoolPopulate(dict *sampledict, dict *keydict, struct evictionPoolEn
 }
 
 int freeMemoryIfNeeded(void) {
-    size_t mem_used, mem_tofree, mem_freed;
+    size_t mem_reported, mem_used, mem_tofree, mem_freed;
     int slaves = listLength(server.slaves);
     mstime_t latency, eviction_latency;
+    long long delta;
+
+    /* Check if we are over the memory usage limit. If we are not, no need
+     * to subtract the slaves output buffers. We can just return ASAP. */
+    mem_reported = zmalloc_used_memory();
+    if (mem_reported <= server.maxmemory) return C_OK;
 
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
-    mem_used = zmalloc_used_memory();
+    mem_used = mem_reported;
     if (slaves) {
         listIter li;
         listNode *ln;
@@ -3481,15 +3503,16 @@ int freeMemoryIfNeeded(void) {
         mem_used -= aofRewriteBufferSize();
     }
 
-    /* Check if we are over the memory limit. */
+    /* Check if we are still over the memory limit. */
     if (mem_used <= server.maxmemory) return C_OK;
-
-    if (server.maxmemory_policy == MAXMEMORY_NO_EVICTION)
-        return C_ERR; /* We need to free memory, but policy forbids. */
 
     /* Compute how much memory we need to free. */
     mem_tofree = mem_used - server.maxmemory;
     mem_freed = 0;
+
+    if (server.maxmemory_policy == MAXMEMORY_NO_EVICTION)
+        goto cant_free; /* We need to free memory, but policy forbids. */
+
     latencyStartMonitor(latency);
     while (mem_freed < mem_tofree) {
         int j, k, keys_freed = 0;
@@ -3575,11 +3598,9 @@ int freeMemoryIfNeeded(void) {
 
             /* Finally remove the selected key. */
             if (bestkey) {
-                long long delta;
-
                 robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
-                propagateExpire(db,keyobj);
-                /* We compute the amount of memory freed by dbDelete() alone.
+                propagateExpire(db,keyobj,server.lazyfree_lazy_eviction);
+                /* We compute the amount of memory freed by db*Delete() alone.
                  * It is possible that actually the memory needed to propagate
                  * the DEL in AOF and replication link is greater than the one
                  * we are freeing removing the key, but we can't account for
@@ -3589,7 +3610,10 @@ int freeMemoryIfNeeded(void) {
                  * we only care about memory used by the key space. */
                 delta = (long long) zmalloc_used_memory();
                 latencyStartMonitor(eviction_latency);
-                dbDelete(db,keyobj);
+                if (server.lazyfree_lazy_eviction)
+                    dbAsyncDelete(db,keyobj);
+                else
+                    dbSyncDelete(db,keyobj);
                 latencyEndMonitor(eviction_latency);
                 latencyAddSampleIfNeeded("eviction-del",eviction_latency);
                 latencyRemoveNestedEvent(latency,eviction_latency);
@@ -3611,12 +3635,23 @@ int freeMemoryIfNeeded(void) {
         if (!keys_freed) {
             latencyEndMonitor(latency);
             latencyAddSampleIfNeeded("eviction-cycle",latency);
-            return C_ERR; /* nothing to free... */
+            goto cant_free; /* nothing to free... */
         }
     }
     latencyEndMonitor(latency);
     latencyAddSampleIfNeeded("eviction-cycle",latency);
     return C_OK;
+
+cant_free:
+    /* We are here if we are not able to reclaim memory. There is only one
+     * last thing we can try: check if the lazyfree thread has jobs in queue
+     * and wait... */
+    while(bioPendingJobsOfType(BIO_LAZY_FREE)) {
+        if (((mem_reported - zmalloc_used_memory()) + mem_freed) >= mem_tofree)
+            break;
+        usleep(1000);
+    }
+    return C_ERR;
 }
 
 /* =================================== Main! ================================ */
@@ -3793,7 +3828,7 @@ void setupSignalHandlers(void) {
 void memtest(size_t megabytes, int passes);
 
 /* Returns 1 if there is --sentinel among the arguments or if
- * argv[0] is exactly "redis-sentinel". */
+ * argv[0] contains "redis-sentinel". */
 int checkForSentinelMode(int argc, char **argv) {
     int j;
 
@@ -3980,6 +4015,7 @@ int main(int argc, char **argv) {
     dictSetHashFunctionSeed(tv.tv_sec^tv.tv_usec^getpid());
     server.sentinel_mode = checkForSentinelMode(argc,argv);
     initServerConfig();
+    moduleInitModulesSystem();
 
     /* Store the executable path and arguments in a safe place in order
      * to be able to restart the server later. */
@@ -4000,7 +4036,7 @@ int main(int argc, char **argv) {
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
     if (strstr(argv[0],"redis-check-rdb") != NULL)
-        redis_check_rdb_main(argc,argv);
+        exit(redis_check_rdb_main(argv,argc));
 
     if (argc >= 2) {
         j = 1; /* First option to parse in argv[] */
@@ -4082,10 +4118,12 @@ int main(int argc, char **argv) {
 
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
+        initV8();
         serverLog(LL_WARNING,"Server started, Redis version " REDIS_VERSION);
     #ifdef __linux__
         linuxMemoryWarnings();
     #endif
+        moduleLoadFromQueue();
         loadDataFromDisk();
         if (server.cluster_enabled) {
             if (verifyClusterConfigWithData() == C_ERR) {
