@@ -34,3 +34,4 @@ deps/_gclient*
 deps/v8/
 .idea/*
 
+/CMakeLists.txt
